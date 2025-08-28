@@ -8,14 +8,20 @@ let io: Server | null = null;
 function serializeRoom(doc: any) {
   return {
     room_id: doc.room_id,
-    player1_name: doc.player1_name,
-    player2_name: doc.player2_name,
+    player1_name: doc.player1_name ?? null,
+    player2_name: doc.player2_name ?? null,
     board: doc.board,
     turn: doc.turn,
     status: doc.status,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
+}
+
+async function broadcastState(roomId: string) {
+  const doc = await Room.findOne({ room_id: roomId });
+  if (!doc) return;
+  getIO().to(roomId).emit("room_state", serializeRoom(doc));
 }
 
 export function initWebSocket(httpServer: HttpServer) {
@@ -33,30 +39,20 @@ export function initWebSocket(httpServer: HttpServer) {
     // eslint-disable-next-line no-console
     console.log("WS connected:", socket.id);
 
-    // AC do Passo 6 (já implementado)
+    // --- ping/pong (Passo 6)
     socket.on("ping", () => socket.emit("pong"));
 
-    /**
-     * Evento: create_room
-     * payload: { playerName?: string, roomId?: string }
-     * - Gera room_id se não vier
-     * - Criador é sempre 'X'
-     * - Persiste no Mongo
-     * - Responde com 'room_created' ou 'ws_error'
-     */
+    // --- create_room (Passo 7)
     socket.on("create_room", async (payload: any) => {
       try {
         const { playerName, roomId } = payload ?? {};
         let p1 = typeof playerName === "string" ? playerName : "Player 1";
         if (!isValidName(p1)) p1 = "Player 1";
 
-        // Gera/valida ID e garante unicidade
         let rid: string = typeof roomId === "string" ? roomId.trim() : generateRoomId();
         if (!/^[A-Za-z0-9_-]{4,32}$/.test(rid)) {
           rid = generateRoomId();
         }
-        // evita colisão (muito raro, mas melhor garantir)
-        // tenta até achar um que não exista
         for (let i = 0; i < 5; i++) {
           // eslint-disable-next-line no-await-in-loop
           const exists = await Room.exists({ room_id: rid });
@@ -64,17 +60,14 @@ export function initWebSocket(httpServer: HttpServer) {
           rid = generateRoomId();
         }
 
-        // cria documento com defaults do schema (board vazio, status=waiting, turn='X')
         const doc = await Room.create({
           room_id: rid,
           player1_name: p1.trim(),
         });
 
-        // coloca o criador na "room" do Socket.IO e salva alguns dados na sessão
         await socket.join(rid);
         socket.data = { roomId: rid, symbol: "X", name: p1.trim() };
 
-        // responde ao cliente
         socket.emit("room_created", {
           roomId: doc.room_id,
           assigned: "X",
@@ -86,6 +79,85 @@ export function initWebSocket(httpServer: HttpServer) {
         socket.emit("ws_error", {
           code: "CREATE_ROOM_FAILED",
           message: "Falha ao criar sala",
+          detail: err?.message ?? String(err),
+        });
+      }
+    });
+
+    // --- join_room (Passo 8)
+    /**
+     * Evento: join_room
+     * payload: { roomId: string, playerName?: string }
+     * Regras:
+     *  - Sala deve existir e estar waiting
+     *  - player2_name é setado e status vira active
+     *  - Jogador que entra recebe 'assigned: "O"'
+     *  - Broadcast do estado inicial para a sala inteira (room_state)
+     */
+    socket.on("join_room", async (payload: any) => {
+      try {
+        const { roomId, playerName } = payload ?? {};
+        const rid = typeof roomId === "string" ? roomId.trim() : "";
+        if (!/^[A-Za-z0-9_-]{4,32}$/.test(rid)) {
+          return socket.emit("ws_error", {
+            code: "ROOM_ID_INVALID",
+            message: "roomId inválido",
+          });
+        }
+
+        let p2 = typeof playerName === "string" ? playerName : "Player 2";
+        if (!isValidName(p2)) p2 = "Player 2";
+
+        // Atualização atômica: só entra se a sala estiver waiting e sem player2_name
+        const updated = await Room.findOneAndUpdate(
+          {
+            room_id: rid,
+            status: "waiting",
+            $or: [{ player2_name: { $exists: false } }, { player2_name: null }, { player2_name: "" }],
+          },
+          { $set: { player2_name: p2.trim(), status: "active" } },
+          { new: true }
+        );
+
+        if (!updated) {
+          // sala não existe, já está ativa ou está cheia
+          const exists = await Room.exists({ room_id: rid });
+          if (!exists) {
+            return socket.emit("ws_error", {
+              code: "ROOM_NOT_FOUND",
+              message: "Sala não encontrada",
+            });
+          }
+          const doc = await Room.findOne({ room_id: rid }).lean();
+          if (doc?.status !== "waiting" || doc?.player2_name) {
+            return socket.emit("ws_error", {
+              code: "ROOM_FULL",
+              message: "Sala cheia ou já ativa",
+            });
+          }
+          return socket.emit("ws_error", {
+            code: "JOIN_FAILED",
+            message: "Não foi possível entrar na sala",
+          });
+        }
+
+        await socket.join(rid);
+        socket.data = { roomId: rid, symbol: "O", name: p2.trim() };
+
+        // Notifica o jogador que entrou
+        socket.emit("room_joined", {
+          roomId: updated.room_id,
+          assigned: "O",
+        });
+
+        // Broadcast do estado inicial para os dois jogadores
+        await broadcastState(rid);
+      } catch (err: any) {
+        // eslint-disable-next-line no-console
+        console.error("join_room error:", err);
+        socket.emit("ws_error", {
+          code: "JOIN_ROOM_FAILED",
+          message: "Falha ao entrar na sala",
           detail: err?.message ?? String(err),
         });
       }
