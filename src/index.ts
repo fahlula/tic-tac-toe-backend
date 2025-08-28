@@ -6,6 +6,11 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// Healthcheck - simples e sem dependências externas
+app.get("/healthz", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 // rota simples provisória (só para validar que o servidor sobe)
 app.get("/", (_req, res) => {
   res.send({ ok: true, message: "Tic-Tac-Toe backend running" });
