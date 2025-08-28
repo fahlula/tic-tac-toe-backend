@@ -1,20 +1,8 @@
+import { generateRoomId, isValidName } from "../utils/helpers";
 import { Router } from "express";
 import Room from "../models/Room";
 
 const router = Router();
-
-function generateRoomId(): string {
-  // ID curto amigável (6-8 chars). Ajuste como quiser.
-  return Math.random().toString(36).slice(2, 8);
-}
-
-function isValidName(name: unknown): name is string {
-  if (typeof name !== "string") return false;
-  const trimmed = name.trim();
-  if (trimmed.length < 1 || trimmed.length > 30) return false;
-  // letras, números, espaço, _ e -
-  return /^[\p{L}\p{N}\s_-]+$/u.test(trimmed);
-}
 
 /**
  * POST /api/rooms
