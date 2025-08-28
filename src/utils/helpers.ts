@@ -10,3 +10,11 @@ export function isValidName(name: unknown): name is string {
   // letras, números, espaço, _ e -
   return /^[\p{L}\p{N}\s_-]+$/u.test(trimmed);
 }
+
+export function isValidIndex(n: unknown): n is number {
+  return Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 8;
+}
+
+export function nextTurn(symbol: "X" | "O"): "X" | "O" {
+  return symbol === "X" ? "O" : "X";
+}
