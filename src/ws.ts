@@ -31,8 +31,7 @@ async function broadcastState(roomId: string) {
 }
 
 export function initWebSocket(httpServer: HttpServer) {
-  const allowedOrigins =
-    process.env.FRONTEND_ORIGIN?.split(",").map((s) => s.trim()) || "*";
+  const allowedOrigins = process.env.FRONTEND_ORIGIN?.split(",").map((s) => s.trim()) || "*";
 
   io = new Server(httpServer, {
     cors: {
@@ -118,10 +117,14 @@ export function initWebSocket(httpServer: HttpServer) {
           {
             room_id: rid,
             status: "waiting",
-            $or: [{ player2_name: { $exists: false } }, { player2_name: null }, { player2_name: "" }],
+            $or: [
+              { player2_name: { $exists: false } },
+              { player2_name: null },
+              { player2_name: "" },
+            ],
           },
           { $set: { player2_name: p2.trim(), status: "active" } },
-          { new: true }
+          { new: true },
         );
 
         if (!updated) {
@@ -237,7 +240,7 @@ export function initWebSocket(httpServer: HttpServer) {
           const finished = await Room.findOneAndUpdate(
             { room_id: rid, status: "active" }, // apenas se ainda estiver ativo
             { $set: { status: newStatus }, $currentDate: { updatedAt: true } },
-            { new: true }
+            { new: true },
           );
 
           if (finished) {
@@ -253,6 +256,76 @@ export function initWebSocket(httpServer: HttpServer) {
         socket.emit("ws_error", {
           code: "MAKE_MOVE_FAILED",
           message: "Falha ao processar jogada",
+          detail: err?.message ?? String(err),
+        });
+      }
+    });
+
+    // --- restart
+    /**
+     * payload: { roomId: string }
+     * Regras:
+     *  - O socket precisa estar na sala
+     *  - Sala deve existir e ter 2 jogadores
+     * Efeitos:
+     *  - board = ["",...,""], status = "active", turn = "X"
+     *  - emite 'restarted' (opcional) e 'room_state' para todos
+     */
+    socket.on("restart", async (payload: any) => {
+      try {
+        const { roomId } = payload ?? {};
+        const rid = typeof roomId === "string" ? roomId.trim() : "";
+        if (!/^[A-Za-z0-9_-]{4,32}$/.test(rid)) {
+          return socket.emit("ws_error", { code: "ROOM_ID_INVALID", message: "roomId inválido" });
+        }
+
+        // precisa estar na sala
+        const myRoomId = socket.data?.roomId;
+        if (!myRoomId || myRoomId !== rid) {
+          return socket.emit("ws_error", {
+            code: "NOT_IN_ROOM",
+            message: "Você não está na sala informada",
+          });
+        }
+
+        // existir e ter 2 jogadores
+        const exists = await Room.findOne({
+          room_id: rid,
+          player1_name: { $exists: true, $ne: "" },
+          player2_name: { $exists: true, $ne: "" },
+        }).lean();
+
+        if (!exists) {
+          return socket.emit("ws_error", {
+            code: "ROOM_NOT_READY",
+            message: "Sala inexistente ou sem dois jogadores",
+          });
+        }
+
+        const updated = await Room.findOneAndUpdate(
+          { room_id: rid },
+          {
+            $set: { board: Array(9).fill(""), status: "active", turn: "X" },
+            $currentDate: { updatedAt: true },
+          },
+          { new: true },
+        );
+
+        if (!updated) {
+          return socket.emit("ws_error", {
+            code: "RESTART_FAILED",
+            message: "Não foi possível reiniciar a sala",
+          });
+        }
+
+        socket.emit("restarted", { roomId: rid }); // opcional
+        await broadcastState(rid);
+      } catch (err: any) {
+        // eslint-disable-next-line no-console
+        console.error("restart error:", err);
+        socket.emit("ws_error", {
+          code: "RESTART_ERROR",
+          message: "Erro ao reiniciar a sala",
           detail: err?.message ?? String(err),
         });
       }
