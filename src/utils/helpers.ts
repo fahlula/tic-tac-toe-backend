@@ -18,3 +18,16 @@ export function isValidIndex(n: unknown): n is number {
 export function nextTurn(symbol: "X" | "O"): "X" | "O" {
   return symbol === "X" ? "O" : "X";
 }
+
+export function normalizeName(name: string): string {
+  return name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .toLowerCase()
+    .trim();
+}
+
+export function sameName(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  return normalizeName(a) === normalizeName(b);
+}

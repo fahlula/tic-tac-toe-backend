@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from "http";
 import { Server } from "socket.io";
 import Room from "./models/Room";
-import { generateRoomId, isValidName, isValidIndex, nextTurn } from "./utils/helpers";
+import { generateRoomId, isValidName, isValidIndex, nextTurn, sameName } from "./utils/helpers";
 import { detectWinner } from "./login/detectWinner";
 
 let io: Server | null = null;
@@ -163,6 +163,61 @@ export function initWebSocket(httpServer: HttpServer) {
         socket.emit("ws_error", {
           code: "JOIN_ROOM_FAILED",
           message: "Falha ao entrar na sala",
+          detail: err?.message ?? String(err),
+        });
+      }
+    });
+    /**
+     * Evento: rejoin_room
+     * payload: { roomId: string, playerName: string }
+     * - Reassocia o socket do jogador X/O à sala, mesmo se status = active
+     * - Não altera estado do jogo; só reentra e recebe o snapshot atual
+     * Respostas:
+     *   - 'rejoined' { roomId, assigned: "X"|"O" }
+     *   - 'ws_error' com códigos: ROOM_NOT_FOUND | NAME_NOT_MATCH | ROOM_ID_INVALID
+     */
+    socket.on("rejoin_room", async (payload: any) => {
+      try {
+        const { roomId, playerName } = payload ?? {};
+        const rid = typeof roomId === "string" ? roomId.trim() : "";
+        if (!/^[A-Za-z0-9_-]{4,32}$/.test(rid)) {
+          return socket.emit("ws_error", { code: "ROOM_ID_INVALID", message: "roomId inválido" });
+        }
+        if (!isValidName(playerName)) {
+          return socket.emit("ws_error", { code: "NAME_INVALID", message: "Nome inválido" });
+        }
+
+        const doc = await Room.findOne({ room_id: rid }).lean();
+        if (!doc) {
+          return socket.emit("ws_error", {
+            code: "ROOM_NOT_FOUND",
+            message: "Sala não encontrada",
+          });
+        }
+
+        // Descobre o símbolo do jogador pelo nome salvo
+        let assigned: "X" | "O" | null = null;
+        if (sameName(playerName, doc.player1_name)) assigned = "X";
+        else if (sameName(playerName, doc.player2_name)) assigned = "O";
+
+        if (!assigned) {
+          return socket.emit("ws_error", {
+            code: "NAME_NOT_MATCH",
+            message: "Nome não corresponde a nenhum jogador desta sala",
+          });
+        }
+
+        await socket.join(rid);
+        socket.data = { roomId: rid, symbol: assigned, name: playerName.trim() };
+
+        socket.emit("rejoined", { roomId: rid, assigned });
+        await broadcastState(rid); // envia snapshot atual para todos (inclui quem reentrou)
+      } catch (err: any) {
+        // eslint-disable-next-line no-console
+        console.error("rejoin_room error:", err);
+        socket.emit("ws_error", {
+          code: "REJOIN_ERROR",
+          message: "Falha ao reentrar na sala",
           detail: err?.message ?? String(err),
         });
       }
