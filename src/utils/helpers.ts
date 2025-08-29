@@ -1,6 +1,13 @@
 export function generateRoomId(): string {
-  // ID curto e fácil de compartilhar (6 chars). Ajuste se quiser.
   return Math.random().toString(36).slice(2, 8);
+}
+
+export function sanitizeName(name: string): string {
+  // remove espaços duplicados e recorta
+  let s = name.replace(/\s+/g, " ").trim();
+  // opcional: limita hard 30 chars
+  if (s.length > 30) s = s.slice(0, 30);
+  return s;
 }
 
 export function isValidName(name: unknown): name is string {
@@ -22,12 +29,12 @@ export function nextTurn(symbol: "X" | "O"): "X" | "O" {
 export function normalizeName(name: string): string {
   return name
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
 }
 
-export function sameName(a?: string, b?: string): boolean {
+export function sameName(a?: string | null, b?: string | null): boolean {
   if (!a || !b) return false;
   return normalizeName(a) === normalizeName(b);
 }

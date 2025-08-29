@@ -1,8 +1,16 @@
 import type { Server as HttpServer } from "http";
 import { Server } from "socket.io";
 import Room from "./models/Room";
-import { generateRoomId, isValidName, isValidIndex, nextTurn, sameName } from "./utils/helpers";
+import {
+  generateRoomId,
+  isValidName,
+  isValidIndex,
+  nextTurn,
+  sameName,
+  sanitizeName,
+} from "./utils/helpers";
 import { detectWinner } from "./login/detectWinner";
+import { attachSocketRateLimiter } from "./wslimiter";
 
 let io: Server | null = null;
 
@@ -41,26 +49,26 @@ export function initWebSocket(httpServer: HttpServer) {
   });
 
   io.on("connection", (socket) => {
-    // eslint-disable-next-line no-console
+    const eps = Number(process.env.WS_EVENTS_PER_SEC || 20);
+    const burst = Number(process.env.WS_BURST || 40);
+    attachSocketRateLimiter(socket, eps, burst);
     console.log("WS connected:", socket.id);
 
-    // --- ping/pong (Passo 6)
+    // --- ping/pong
     socket.on("ping", () => socket.emit("pong"));
 
-    // --- create_room (Passo 7)
+    // --- create_room
     socket.on("create_room", async (payload: any) => {
       try {
         const { playerName, roomId } = payload ?? {};
-        let p1 = typeof playerName === "string" ? playerName : "Player 1";
+        let p1 = typeof playerName === "string" ? sanitizeName(playerName) : "Player 1";
         if (!isValidName(p1)) p1 = "Player 1";
 
         let rid: string = typeof roomId === "string" ? roomId.trim() : generateRoomId();
-        if (!/^[A-Za-z0-9_-]{4,32}$/.test(rid)) {
-          rid = generateRoomId();
-        }
-        // evita colisão (muito raro)
+        if (!/^[A-Za-z0-9_-]{4,32}$/.test(rid)) rid = generateRoomId();
+
+        // evita colisões (raras)
         for (let i = 0; i < 5; i++) {
-          // eslint-disable-next-line no-await-in-loop
           const exists = await Room.exists({ room_id: rid });
           if (!exists) break;
           rid = generateRoomId();
@@ -69,7 +77,6 @@ export function initWebSocket(httpServer: HttpServer) {
         const doc = await Room.create({
           room_id: rid,
           player1_name: p1.trim(),
-          // board vazio, status 'waiting' e turn 'X' vêm do schema/default
         });
 
         await socket.join(rid);
@@ -81,7 +88,6 @@ export function initWebSocket(httpServer: HttpServer) {
           state: serializeRoom(doc),
         });
       } catch (err: any) {
-        // eslint-disable-next-line no-console
         console.error("create_room error:", err);
         socket.emit("ws_error", {
           code: "CREATE_ROOM_FAILED",
@@ -91,26 +97,19 @@ export function initWebSocket(httpServer: HttpServer) {
       }
     });
 
-    // --- join_room (Passo 8)
+    // --- join_room
     /**
      * payload: { roomId: string, playerName?: string }
-     * - Sala deve existir e estar 'waiting'
-     * - Define player2_name e muda status -> 'active'
-     * - Jogador que entra recebe 'O'
-     * - Emite room_state para toda a sala
      */
     socket.on("join_room", async (payload: any) => {
       try {
         const { roomId, playerName } = payload ?? {};
         const rid = typeof roomId === "string" ? roomId.trim() : "";
         if (!/^[A-Za-z0-9_-]{4,32}$/.test(rid)) {
-          return socket.emit("ws_error", {
-            code: "ROOM_ID_INVALID",
-            message: "roomId inválido",
-          });
+          return socket.emit("ws_error", { code: "ROOM_ID_INVALID", message: "roomId inválido" });
         }
 
-        let p2 = typeof playerName === "string" ? playerName : "Player 2";
+        let p2 = typeof playerName === "string" ? sanitizeName(playerName) : "Player 2";
         if (!isValidName(p2)) p2 = "Player 2";
 
         const updated = await Room.findOneAndUpdate(
@@ -151,14 +150,9 @@ export function initWebSocket(httpServer: HttpServer) {
         await socket.join(rid);
         socket.data = { roomId: rid, symbol: "O", name: p2.trim() };
 
-        socket.emit("room_joined", {
-          roomId: updated.room_id,
-          assigned: "O",
-        });
-
+        socket.emit("room_joined", { roomId: updated.room_id, assigned: "O" });
         await broadcastState(rid);
       } catch (err: any) {
-        // eslint-disable-next-line no-console
         console.error("join_room error:", err);
         socket.emit("ws_error", {
           code: "JOIN_ROOM_FAILED",
@@ -167,14 +161,10 @@ export function initWebSocket(httpServer: HttpServer) {
         });
       }
     });
+
+    // --- rejoin_room
     /**
-     * Evento: rejoin_room
      * payload: { roomId: string, playerName: string }
-     * - Reassocia o socket do jogador X/O à sala, mesmo se status = active
-     * - Não altera estado do jogo; só reentra e recebe o snapshot atual
-     * Respostas:
-     *   - 'rejoined' { roomId, assigned: "X"|"O" }
-     *   - 'ws_error' com códigos: ROOM_NOT_FOUND | NAME_NOT_MATCH | ROOM_ID_INVALID
      */
     socket.on("rejoin_room", async (payload: any) => {
       try {
@@ -195,7 +185,6 @@ export function initWebSocket(httpServer: HttpServer) {
           });
         }
 
-        // Descobre o símbolo do jogador pelo nome salvo
         let assigned: "X" | "O" | null = null;
         if (sameName(playerName, doc.player1_name)) assigned = "X";
         else if (sameName(playerName, doc.player2_name)) assigned = "O";
@@ -208,12 +197,11 @@ export function initWebSocket(httpServer: HttpServer) {
         }
 
         await socket.join(rid);
-        socket.data = { roomId: rid, symbol: assigned, name: playerName.trim() };
+        socket.data = { roomId: rid, symbol: assigned, name: sanitizeName(playerName) };
 
         socket.emit("rejoined", { roomId: rid, assigned });
-        await broadcastState(rid); // envia snapshot atual para todos (inclui quem reentrou)
+        await broadcastState(rid);
       } catch (err: any) {
-        // eslint-disable-next-line no-console
         console.error("rejoin_room error:", err);
         socket.emit("ws_error", {
           code: "REJOIN_ERROR",
@@ -223,20 +211,9 @@ export function initWebSocket(httpServer: HttpServer) {
       }
     });
 
-    // --- make_move (Passo 9)
+    // --- make_move
     /**
      * payload: { roomId: string, index: number }
-     * Regras:
-     *  - Sala 'active'
-     *  - Deve ser a vez do meu símbolo (socket.data.symbol)
-     *  - Célula precisa estar vazia
-     * Efeitos:
-     *  - Atualiza board[index] com meu símbolo
-     *  - Alterna 'turn'
-     *  - Emite 'room_state' para toda a sala
-     * Erros:
-     *  - Emite 'illegal_move' com códigos: ROOM_ID_INVALID | INDEX_INVALID | NOT_IN_ROOM
-     *    | ROOM_NOT_FOUND | GAME_NOT_ACTIVE | NOT_YOUR_TURN | CELL_OCCUPIED | MOVE_REJECTED
      */
     socket.on("make_move", async (payload: any) => {
       try {
@@ -250,24 +227,17 @@ export function initWebSocket(httpServer: HttpServer) {
         }
 
         const myRoomId = socket.data?.roomId;
-        const mySymbol = socket.data?.symbol; // "X" | "O"
+        const mySymbol = socket.data?.symbol as "X" | "O" | undefined;
         if (!myRoomId || myRoomId !== rid || (mySymbol !== "X" && mySymbol !== "O")) {
           return socket.emit("illegal_move", { code: "NOT_IN_ROOM" });
         }
 
         const path = `board.${index}`;
-        const filter: any = {
-          room_id: rid,
-          status: "active",
-          turn: mySymbol,
-        };
-        (filter as any)[path] = ""; // garante célula vazia
+        const filter: any = { room_id: rid, status: "active", turn: mySymbol };
+        (filter as any)[path] = ""; // célula deve estar vazia
 
         const update = {
-          $set: {
-            [path]: mySymbol,
-            turn: nextTurn(mySymbol),
-          },
+          $set: { [path]: mySymbol, turn: nextTurn(mySymbol) },
           $currentDate: { updatedAt: true },
         };
 
@@ -285,7 +255,7 @@ export function initWebSocket(httpServer: HttpServer) {
           return socket.emit("illegal_move", { code: "MOVE_REJECTED" });
         }
 
-        // >>> NOVO: checar fim de jogo e finalizar se necessário
+        // checa fim de jogo
         const outcome = detectWinner(updated.board as any);
         if (outcome) {
           let newStatus: "x_won" | "o_won" | "draw" = "draw";
@@ -293,20 +263,17 @@ export function initWebSocket(httpServer: HttpServer) {
           else if (outcome === "O") newStatus = "o_won";
 
           const finished = await Room.findOneAndUpdate(
-            { room_id: rid, status: "active" }, // apenas se ainda estiver ativo
+            { room_id: rid, status: "active" },
             { $set: { status: newStatus }, $currentDate: { updatedAt: true } },
             { new: true },
           );
-
           if (finished) {
-            getIO().to(rid).emit("game_over", { status: finished.status }); // opcional
+            getIO().to(rid).emit("game_over", { status: finished.status });
           }
         }
 
-        // Sempre enviar o estado mais recente (com status final, se houve)
         await broadcastState(rid);
       } catch (err: any) {
-        // eslint-disable-next-line no-console
         console.error("make_move error:", err);
         socket.emit("ws_error", {
           code: "MAKE_MOVE_FAILED",
@@ -317,15 +284,6 @@ export function initWebSocket(httpServer: HttpServer) {
     });
 
     // --- restart
-    /**
-     * payload: { roomId: string }
-     * Regras:
-     *  - O socket precisa estar na sala
-     *  - Sala deve existir e ter 2 jogadores
-     * Efeitos:
-     *  - board = ["",...,""], status = "active", turn = "X"
-     *  - emite 'restarted' (opcional) e 'room_state' para todos
-     */
     socket.on("restart", async (payload: any) => {
       try {
         const { roomId } = payload ?? {};
@@ -334,7 +292,6 @@ export function initWebSocket(httpServer: HttpServer) {
           return socket.emit("ws_error", { code: "ROOM_ID_INVALID", message: "roomId inválido" });
         }
 
-        // precisa estar na sala
         const myRoomId = socket.data?.roomId;
         if (!myRoomId || myRoomId !== rid) {
           return socket.emit("ws_error", {
@@ -343,13 +300,11 @@ export function initWebSocket(httpServer: HttpServer) {
           });
         }
 
-        // existir e ter 2 jogadores
         const exists = await Room.findOne({
           room_id: rid,
           player1_name: { $exists: true, $ne: "" },
           player2_name: { $exists: true, $ne: "" },
         }).lean();
-
         if (!exists) {
           return socket.emit("ws_error", {
             code: "ROOM_NOT_READY",
@@ -365,7 +320,6 @@ export function initWebSocket(httpServer: HttpServer) {
           },
           { new: true },
         );
-
         if (!updated) {
           return socket.emit("ws_error", {
             code: "RESTART_FAILED",
@@ -373,10 +327,9 @@ export function initWebSocket(httpServer: HttpServer) {
           });
         }
 
-        socket.emit("restarted", { roomId: rid }); // opcional
+        socket.emit("restarted", { roomId: rid });
         await broadcastState(rid);
       } catch (err: any) {
-        // eslint-disable-next-line no-console
         console.error("restart error:", err);
         socket.emit("ws_error", {
           code: "RESTART_ERROR",
@@ -387,7 +340,6 @@ export function initWebSocket(httpServer: HttpServer) {
     });
 
     socket.on("disconnect", (reason) => {
-      // eslint-disable-next-line no-console
       console.log("WS disconnected:", socket.id, reason);
     });
   });
