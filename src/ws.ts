@@ -2,6 +2,7 @@ import type { Server as HttpServer } from "http";
 import { Server } from "socket.io";
 import Room from "./models/Room";
 import { generateRoomId, isValidName, isValidIndex, nextTurn } from "./utils/helpers";
+import { detectWinner } from "./login/detectWinner";
 
 let io: Server | null = null;
 
@@ -226,8 +227,26 @@ export function initWebSocket(httpServer: HttpServer) {
           return socket.emit("illegal_move", { code: "MOVE_REJECTED" });
         }
 
+        // >>> NOVO: checar fim de jogo e finalizar se necessário
+        const outcome = detectWinner(updated.board as any);
+        if (outcome) {
+          let newStatus: "x_won" | "o_won" | "draw" = "draw";
+          if (outcome === "X") newStatus = "x_won";
+          else if (outcome === "O") newStatus = "o_won";
+
+          const finished = await Room.findOneAndUpdate(
+            { room_id: rid, status: "active" }, // apenas se ainda estiver ativo
+            { $set: { status: newStatus }, $currentDate: { updatedAt: true } },
+            { new: true }
+          );
+
+          if (finished) {
+            getIO().to(rid).emit("game_over", { status: finished.status }); // opcional
+          }
+        }
+
+        // Sempre enviar o estado mais recente (com status final, se houve)
         await broadcastState(rid);
-        // (Passo 10: após a jogada, vamos checar vitória/empate e finalizar se for o caso)
       } catch (err: any) {
         // eslint-disable-next-line no-console
         console.error("make_move error:", err);
