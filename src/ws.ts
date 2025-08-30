@@ -9,7 +9,7 @@ import {
   sameName,
   sanitizeName,
 } from "./utils/helpers";
-import { detectWinner } from "./login/detectWinner";
+import { detectWinner } from "./logic/detectWinner";
 import { attachSocketRateLimiter } from "./wslimiter";
 
 let io: Server | null = null;
