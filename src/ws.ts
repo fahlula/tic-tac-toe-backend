@@ -4,7 +4,7 @@ import Room from "./models/Room";
 import { generateRoomId, isValidName, isValidIndex, nextTurn, sameName, sanitizeName } from "./utils/helpers";
 import { detectWinner } from "./logic/detectWinner";
 // se você usa limiter:
-import { attachSocketRateLimiter } from "./wsLimiter";
+import { attachSocketRateLimiter } from "./wslimiter";
 
 let io: Server | null = null;
 
