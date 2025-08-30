@@ -14,55 +14,54 @@ const app = express();
 // Em Render/NGINX, permite que Express veja o IP real do cliente
 app.set("trust proxy", 1);
 
-/**
- * CORS: somente os domínios informados em FRONTEND_ORIGIN podem acessar via browser.
- * Em dev, requisições SEM Origin (ex.: Postman/cURL) são permitidas.
- * Implementação resiliente: não lança erro (evita 500); apenas omite os headers CORS.
- */
-const rawOrigins =
-  process.env.FRONTEND_ORIGIN?.split(",").map((s) => s.trim()).filter(Boolean) || [];
+// -------- CORS com fallback seguro --------
+const isProd = process.env.NODE_ENV === "production";
+const allowAll = String(process.env.ALLOW_ALL_ORIGINS || "").toLowerCase() === "true";
 
 // normaliza (minúsculas, sem barra final)
 const normalize = (s?: string) => (s ? s.toLowerCase().replace(/\/$/, "") : s);
+
+// se FRONTEND_ORIGIN faltar:
+//  - em DEV: libera localhost:5173 e 127.0.0.1:5173
+//  - em PROD: não libera nada (a menos que ALLOW_ALL_ORIGINS=true)
+const defaultDevOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
+const rawOrigins =
+  process.env.FRONTEND_ORIGIN?.split(",").map((s) => s.trim()).filter(Boolean) ||
+  (!isProd ? defaultDevOrigins : []);
+
 const allowedSet = new Set(rawOrigins.map(normalize));
 
 const corsOptions: CorsOptions = {
   origin(origin, callback) {
-    // Sem Origin (Postman, cURL, healthchecks): permite em DEV, bloqueia em PROD
+    if (allowAll) {
+      // Libera tudo (use só para teste!)
+      return callback(null, true);
+    }
+    // Sem Origin (Postman/cURL/healthcheck): permite em dev, bloqueia em prod
     if (!origin) {
-      const allowNoOrigin = process.env.NODE_ENV !== "production";
-      return callback(null, allowNoOrigin);
+      return callback(null, !isProd);
     }
-
     const norm = normalize(origin);
-
     // aceita equivalência localhost <-> 127.0.0.1
-    const variants = new Set<string>();
+    const candidates = new Set<string>();
     if (norm) {
-      variants.add(norm);
-      variants.add(norm.replace("127.0.0.1", "localhost"));
-      variants.add(norm.replace("localhost", "127.0.0.1"));
+      candidates.add(norm);
+      candidates.add(norm.replace("127.0.0.1", "localhost"));
+      candidates.add(norm.replace("localhost", "127.0.0.1"));
     }
-
-    // se qualquer variante estiver na lista permitida, libera
-    const ok = [...variants].some((v) => allowedSet.has(v));
-
-    // NÃO lançar erro: ok => adiciona headers; !ok => sem headers (navegador bloqueia)
+    const ok = [...candidates].some((v) => allowedSet.has(v));
+    // não lança erro (evita 500); só omite os headers se não ok
     return callback(null, ok);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true,
-  optionsSuccessStatus: 204, // melhor para preflight antigo
+  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
 app.use(helmet());
 
-/**
- * Rate limit HTTP (por IP)
- * RATE_WINDOW_MS: janela (ms)
- * RATE_MAX: máximo de requisições por janela
- */
+// -------- Rate limit HTTP --------
 const windowMs = Number(process.env.RATE_WINDOW_MS || 1000);
 const max = Number(process.env.RATE_MAX || 20);
 
@@ -100,8 +99,6 @@ async function bootstrap() {
   try {
     const uri = process.env.MONGODB_URI || "";
     await connectMongo(uri);
-
-    // opcional: garantir índices únicos em produção (room_id)
     try {
       await Room.syncIndexes();
     } catch (e) {
@@ -115,11 +112,20 @@ async function bootstrap() {
 
     httpServer.listen(PORT, () => {
       console.log(`HTTP/WS ouvindo em http://localhost:${PORT}`);
-      const list = [...allowedSet];
-      if (list.length) {
-        console.log("CORS liberado para:", list.join(", "));
+
+      if (allowAll) {
+        console.warn("CORS: ALLOW_ALL_ORIGINS=true (tudo liberado) — use apenas em teste!");
       } else {
-        console.log("CORS: nenhuma origem configurada (FRONTEND_ORIGIN vazia).");
+        const list = [...allowedSet];
+        if (list.length) {
+          console.log("CORS liberado para:", list.join(", "));
+        } else if (!isProd) {
+          console.log("CORS (dev fallback): liberado para", defaultDevOrigins.join(", "));
+        } else {
+          console.warn(
+            "CORS: FRONTEND_ORIGIN não definido em produção — nenhuma origem liberada (navegadores serão bloqueados)."
+          );
+        }
       }
     });
   } catch (err) {
